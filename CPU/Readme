@@ -1,0 +1,171 @@
+VCPU Scheduler
+==============
+The VCPU Scheduler is an application that interfaces with libvirt to perform scheduling of VCPUs
+(Virtual CPUs) of Virtual Machines to PCPUs (Physical CPUs) running in a Linux environment.  
+This VCPU scheduler entails pinning VPUs to one of the available PCPUs in the system in a manner
+that best balances all the VCPU and PCPU loads.
+
+Dependencies
+------------
+The VCPU Scheduler has the following dependencies to use it:
+    * Appropriate libvirt support installed
+    * 1 or more VMs / Domains currently running prior to running VCPU Scheduler
+
+Files
+-----
+The VCPU Scheduler application is composed of the following source files:
+	vcpu_scheduler.c
+	vcpu_scheduler_defs.h
+
+Configuration
+-------------
+The VCPU Scheduler has various configurations associated with the scheduling algorithm
+it employs.  The following are the 3 settings and their defaults (found in
+vcpu_scheduler_defs.h):
+
+	VCPU_SCHEDULER_PCPU_HIGH_THRESHOLD  -	default is 90%
+	VCPU_SCHEDULER_PCPU_TGT             -	default is 80%
+	VCPU_SCHEDULER_PCPU_LOW_THRESHOLD   - 	default is 70%
+
+More details about the algorithms and these settings can be found below.
+
+Building
+--------
+To build the VCPU Scheduler, issue the following command from a shell prompt:
+
+    $ make
+
+The result will be an executable in the same folder called vcpu_scheduler
+
+Running
+-------
+To run the VCPU Scheduler, ensure the dependencies described above are met and issue the following
+command from a shell prompt:
+
+    $ ./vcpu_scheduler <interval>
+
+    where <interval> = time, in seconds, between VCPU scheduling operations
+
+    NOTE:  A time interval of 1 second was used for all testing and is the best option
+           to support reponsive scheduling changes
+
+Requirements
+------------
+The following are the requirements that the VCPU Scheduler fulfills:
+    * Attempt to balance the loads of each VCPU amongst the available PCPUs
+    * Once VMs enters into a stable/balanced state, no more changes are made to VCPU 
+      pinnings by VCPU scheduler
+    * Only supports scenarios where each VM will have a single VCPU
+    * Supports a maximum of 8 VMs running concurrently
+    * Supports scenarios where the number of VMs/VCPUs exceed the number of PCPUs
+    
+Design Overview
+---------------
+The following is a high-level flow chart of the VCPU Scheduler.
+
+     time
+   interval
+       |
+       |
+    ___|____         time               _______________     
+    |      |       interval             |             |<------------------------                        
+    | main |--2------------------------>|  scheduler  |                        |
+    |______|                            |_____________|-sleep for time interval-
+     |     __________                          |
+     |     |  virt  |           _______________|_______________
+     |--1--|  init  |           1              2              3
+     |     |________|    _______|_____   ______|______  ______|_______
+     |     1        2    |  collect  |   |  collect  |  |    vcpu    |
+     |  ___|___  ___|___ |pcpu stats |   |vcpu stats |  | pin adjust |
+     |  |pcpu |  |vcpu | |___________|   |___________|  |____________|             
+     |  |stats|  |stats|
+     |  |init |  |init |
+     |  |_____|  |_____|
+     |
+     |     __________
+     |     |  virt  |
+     |--3--| deinit |   
+           |________|
+
+The following is a description of each function:
+
+    Name        : main
+    Signature   : int main(int argc, char ** argv)
+    Description : Ensure command-line parameters are correct / valid before calling virt_init.  
+                  If virt_init returns successfully, the scheduler is called.
+                  If control returns from the scheduler, virt_deinit is called.
+                 
+    Name        : virt_init
+    Signature   : static int virt_init(void)
+    Description : This funciton initializes the virtualization support which includes
+                  establishing the connection to the QEMU system, getting a list of the
+                  domains / VMs in the system, getting number of PCPUs in the system before
+                  calling functions to initialize PCPU and VCPU stats
+                  
+    Name        : pcpu_stats_init
+    Signature   : static int pcpu_stats_init(void)
+    Description : This funciton initializes the PCPU stats structures based on the number
+                  of PCPUs.  This information includes setting CPU map and the initial 
+                  idle time for the given PCPU.
+                  
+    Name        : vcpu_stats_init
+    Signature   : static int vcpu_stats_init(void)
+    Description : This funciton initializes the VCPU stats structures based on the number
+                  of VMs detected.  This information for each VCPU includes the time the VCPU
+                  has spent running.  Additionally, all VCPUs are initially spread out as
+                  equally as possible among the available PCPUs by pinning each VCPU to a
+                  single PCPU.  The VCPU and PCPU data structures keep track, using linked
+                  lists, which VCPUs are pinned to each PCPU.
+                  
+    Name        : scheduler
+    Signature   : static int scheduler(unsigned int cycle_time)
+    Description : This funciton sleeps for the specified number of seconds (cycle_time) before
+                  calling collecting PCPU stats, VCPU stats, and adjusting VCPU pinning, as needed
+                  
+    Name        : collect_pcpu_stats
+    Signature   : static int collect_pcpu_stats(unsigned long long ns_cycle_time)
+    Description : This function determines the CPU utilization of each PCPU over the last time
+                  period in order to make VCPU pinning decisions.
+                  
+                  Any PCPU that has more than 1 VCPU pinnned to it AND has CPU utilization over
+                  a configured high threshold will have its bit set in a "high" CPU utilization
+                  bit mask to be used later during VCPU repining.
+                  
+                  Any PCPU that has CPU utilization below a configured low threshold will have
+                  its bit set in a "low" CPU utilization bit mask to be used later during
+                  VCPU repinning. 
+                  
+    Name        : collect_vcpu_stats
+    Signature   : static int collect_pcpu_stats(unsigned long long ns_cycle_time)
+    Description : This function determines the CPU utilization of each VCPU over the last time
+                  period in order to make VCPU pinning decisions.
+                  
+    Name        : vcpu_pinning_adjust
+    Signature   : static int vcpu_pinning_adjust(void)
+    Description : This function loops while any "high" AND "low" marked PCPUs are available to
+                  process.
+                  
+                  For each "high" PCPU, an attempt is made to transfer a VCPU from this "high" PCPU
+                  to a PCPU marked as having "low" CPU utilization.  To accomplish this, a best fit
+                  algorithm is done by checking each VCPU pinned to the "high" PCPU to see which
+                  best fits on the "low" PCPU.  Best fit is determined by trying to make the "low"
+                  PCPU 100% loaded.
+                  
+                  Once the best fit VCPU is found on the "high" loaded PCPU, this VCPU is migrated
+                  from the "high" PCPU to the "low" PCPU by repinning.
+                  
+                  This process continues as long as both high and low PCPUs are available for
+                  migration during each scheduling cycle.
+                  
+Algorithms
+----------
+Two basic algorithms are used in the VCPU Scheduler to properly schedule VCPUs on the PCPUs:
+
+    1.  Proportional Threshold and Target - Threshold values are configured to trigger when a PCPU is
+        considered loaded too much or too little which is used to make VCPU migration decisions.  A 
+        target PCPU loading value is used to adjust high or low loaded PCPUs down or up, accordingly.
+    2.  Best Fit - To determine which VCPU is migrated from a highly loaded PCPU to a lower loaded PCPU,
+        a "best fit" algorithm is used.  This algorithm attempts to find the VCPU that comes closest
+        to making the lower loaded PCPU achieve the "target" loading value and then repins the
+        identified "best fit" VCPU to the lower loaded PCPU.
+        

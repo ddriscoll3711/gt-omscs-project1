@@ -1,0 +1,169 @@
+Memory Coordinator
+==================
+The Memory Coordinator is an application that interfaces with libvirt to perform memory coordination of
+Virtual Machines running in a Linux environment.  This memory coordination entails adding or removing
+memory for the VMs that are running in order to best service the needs of each VM while, at the same time,
+ensuring the host memory is not depleted to a point where the host becomes non-functioning.
+
+Dependencies
+------------
+The Memory Coordinator has the following dependencies:
+    * Appropriate libvirt support installed
+    * 1 or more VMs / Domains currently running prior to running Memory Coordinator
+
+Files
+-----
+The Memory Coordinator application is composed of the following source files:
+	memory_coordinator.c
+	memory_coordinator_defs.h
+
+Configuration
+-------------
+The Memory Coordinator has various configurations associated with the coordination algorithm
+it employs.  The following are the 5 settings and their defaults (found in
+memory_coordinator_defs.h):
+
+	MEM_COORD_AVAIL_HOST_LOW_PERCENT  -	default is 10% of total host memory is available / free
+	MEM_COORD_AVAIL_HOST_TGT_PERCENT  -	default is 15% of total host memory is available / free
+	MEM_COORD_AVAIL_VM_LOW_PERCENT    -	default is 25% of total VM memory is available / free
+	MEM_COORD_AVAIL_VM_TGT_PERCENT    -	default is 30% of total VM memory is available / free
+	MEM_COORD_AVAIL_VM_HIGH_PERCENT   -	default is 33% of total VM memory is available / free
+
+More details about the algorithms and these settings can be found below.
+
+Building
+--------
+To build the Memory Coordinator, issue the following command from a shell prompt:
+
+    $ make
+
+The result will be an executable in the same folder called memory_coordinator
+
+Running
+-------
+To run the Memory Coordinator, ensure the dependencies described above are met and issue the following
+command from a shell prompt:
+
+    $ memory_coordinator <interval>
+
+    where <interval> = time, in seconds, between memory coordination operations
+
+    NOTE:  A time interval of 1 second was used for all testing and is the best option
+           to support reponsive coordination changes
+
+Requirements
+------------
+The following are the requirements that the Memory Coordinator fulfills:
+    * Guest operating system not "killed" by memory coordination activities
+    * Host operating system not "froze" due to memory coordination activities (ie give all memory to guests)
+    * Memory adjusted (given / taken away) to running VMs based on needs of the VMs
+    * Memory adjustments are within bounds of configured VM maximum memory size
+    * Support a maximum of 4 VMs running concurrently
+    
+Design Overview
+---------------
+The following is a high-level flow chart of the Memory Coordinator.
+
+     time
+   interval
+       |
+       |
+    ___|____         time           _______________     
+    |      |       interval         |             |<------------------------                        
+    | main |--2-------------------->| coordinator |                        |
+    |______|                        |_____________|-sleep for time interval-
+     |     __________                      |
+     |     |  virt  |           _____1_____|_____2_______
+     |--1--|  init  |           |                       |
+     |     |________|    _______|_______         _______|_______
+     |         |         |   collect   |         |     vm      |
+     |     ____|_____    |  mem stats  |         | mem adjust  |
+     |     | vm mem |    |_____________|         |_____________|             
+     |     |  info  |
+     |     |  init  |
+     |     |________|
+     |     __________
+     |     |  virt  |
+     |--3--| deinit |   
+           |________|
+
+The following is a description of each function:
+
+    Name        : main
+    Signature   : int main(int argc, char ** argv)
+    Description : Ensure command-line parameters are correct / valid before calling virt_init.  
+                  If virt_init returns successfully, the coordinator is called.
+                  If control returns from the coordinator, virt_deinit is called.
+                 
+    Name        : virt_init
+    Signature   : static int virt_init(void)
+    Description : This funciton initializes the virtualization support which includes
+                  establishing the connection to the QEMU system, getting a list of the
+                  domains / VMs in the system, getting memory information for the host, and
+                  calling vm_mem_info_init
+                  
+    Name        : vm_mem_info_init
+    Signature   : static int vm_mem_info_init(void)
+    Description : This funciton initializes the memory details associated with each VM in
+                  the system to include setting the memory stats period to the faster
+                  possible rate (1 Hz).
+                  
+    Name        : coorindator
+    Signature   : static int coorindator(unsigned int cycle_time)
+    Description : This funciton sleeps for the specified number of seconds (cycle_time) before
+                  calling collecting memory stats and then adjusting memory, as needed
+                  
+    Name        : collect_mem_stats
+    Signature   : static int collect_mem_stats(void)
+    Description : This function updates the host free memory before collecting memory stats
+                  for each VM in the system.  The memory coordinator keeps track of the
+                  total memory in the VM as well as the available or free memory in the
+                  VM.  
+                  
+                  This function also computes the % of available memory within each VM
+                  and determines if the VM has a high or low ratio of total to free memory using
+                  pre-configured thresholds for each.
+                  A bit is set in a bit mask for each high memory and low memory VM to support
+                  adjusting of each VM's memory later, as needed.   
+                  
+    Name        : vm_memory_adjust
+    Signature   : static int vm_memory_adjust(void)
+    Description : This function first loops through all VMs that are set in the "high" memory
+                  bit mask and reclaims memory from these VMs by setting the VM to a configured
+                  target ratio (free to total memory).
+                  
+                  After "high" memory VMs are adjusted to have less memory, this function
+                  processes all VMs that are set in the "low" memory bit mask and provides
+                  more memory to these VMs by determining how much memory to add to the VM
+                  to meet the "target" ratio of free to total memory.   
+                  
+                  The only criteria that prevents a "low" memory VM from getting more memory are:
+                    * Host free memory is running low (below configured threshold)
+                    * "Low" memory VM has reached max VM memory
+                    
+                  If the host memory is running low (ratio of host free to total memory), 
+                  memory is reclaimed from each VM based on the proportion of each VM's total
+                  memory to host total memory.  This proportion is applied to the amount of memory 
+                  calculated to bring the host back to a configured "target" memory ratio.  The
+                  attempt here is to make each VM provide its fair share of memory back to the
+                  host.
+                  
+Algorithms
+----------
+Two basic algorithms are used in the Memory Coordinator to properly coordinate memory usage
+within the VMs:
+
+    1.  Proportional Threshold and Target - Threshold values are configured to trigger when a VM has too
+        much or too little memory.  These thresholds are based on the proportion of free memory for a VM
+        compared to the total memory owned by the VM.  The intent is to try and maintain a consistent ratio
+        of free to total memory for all VMs in the system since VMs with larger total memory sizes are
+        likely to have more needs for future memory as compared to VMs with smaller total memory sizes.
+        A target proportional value is used to increase or decrease a VM's memory when it has too little or
+        too much memory, accordingly.
+    2.  Host Reclamation Fairness - If the host memory goes below the configured threshold, it also uses
+        a target value to adjust its memory back above the low threshold.  In order to do this, the 
+        Memory Coordinator attempts to reclaim memory from each VM using a fairness policy.  The fairness
+        policy tries to reclaim the needed total memory from each VM based on how much total memory the
+        VM is consuming relative to the hosts total memory size.  Using this policy, each VM will
+        be made to give up its proper share of memory to the host.
+        
